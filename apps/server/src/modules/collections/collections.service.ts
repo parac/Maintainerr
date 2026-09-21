@@ -4730,6 +4730,7 @@ export class CollectionsService {
             mediaServerSort: collection.mediaServerSort ?? null,
             overlayEnabled: collection.overlayEnabled ?? false,
             overlayTemplateId: collection.overlayTemplateId ?? null,
+            overlayMode: collection.overlayMode ?? null,
           },
         ])
         .execute();

@@ -401,6 +401,7 @@ export const ruleGroupFormSchema = z
     showHome: z.boolean(),
     overlayEnabled: z.boolean(),
     overlayTemplateId: z.number().int().nullable().optional(),
+    overlayMode: z.enum(['poster', 'titlecard', 'backdrop']).nullable().optional(),
     listExclusions: z.boolean(),
     cleanupLeftoverFolders: z.boolean(),
     forceSeerr: z.boolean(),
@@ -502,6 +503,7 @@ const buildFormDefaults = (editData?: IRuleGroup): RuleGroupFormValues => ({
   showHome: editData?.collection?.visibleOnHome ?? true,
   overlayEnabled: editData?.collection?.overlayEnabled ?? false,
   overlayTemplateId: editData?.collection?.overlayTemplateId ?? null,
+  overlayMode: editData?.collection?.overlayMode ?? null,
   listExclusions: editData?.collection?.listExclusions ?? true,
   cleanupLeftoverFolders: editData?.collection?.cleanupLeftoverFolders ?? false,
   forceSeerr: editData?.collection?.forceSeerr ?? false,
@@ -705,8 +707,9 @@ const AddModal = (props: AddModal) => {
   const [pendingDisableSubmit, setPendingDisableSubmit] =
     useState<RuleGroupFormOutput | null>(null)
 
+  const selectedOverlayMode = useWatch({ control, name: 'overlayMode' })
   const overlayTemplateMode = isValidMediaItemType(selectedType)
-    ? overlayModeForType(selectedType)
+    ? (selectedOverlayMode ?? overlayModeForType(selectedType))
     : 'poster'
   const availableOverlayTemplates = overlayTemplates.filter(
     (template) => template.mode === overlayTemplateMode,
@@ -1076,6 +1079,7 @@ const AddModal = (props: AddModal) => {
         visibleOnHome: data.showHome,
         overlayEnabled: data.overlayEnabled,
         overlayTemplateId: data.overlayTemplateId ?? null,
+        overlayMode: data.overlayMode ?? null,
         deleteAfterDays:
           data.arrAction === undefined ||
           data.arrAction === ServarrAction.DO_NOTHING ||
@@ -1625,6 +1629,36 @@ const AddModal = (props: AddModal) => {
                     </div>
 
                     {overlayEnabled && (
+                      <>
+                      <div className="form-row items-center">
+                        <label htmlFor="overlay_mode" className="text-label">
+                          <Trans>Artwork target</Trans>
+                          <p className="text-xs font-normal">
+                            <Trans>Choose the artwork Infuse displays.</Trans>
+                          </p>
+                        </label>
+                        <div className="form-input">
+                          <Controller
+                            name="overlayMode"
+                            control={control}
+                            render={({ field }) => (
+                              <Select
+                                id="overlay_mode"
+                                value={field.value ?? overlayTemplateMode}
+                                onChange={(event) => field.onChange(event.target.value)}
+                              >
+                                <option value="poster">{t`Poster`}</option>
+                                {selectedType === 'movie' || selectedType === 'show' ? (
+                                  <option value="backdrop">{t`Backdrop`}</option>
+                                ) : null}
+                                {selectedType === 'episode' ? (
+                                  <option value="titlecard">{t`Title Card`}</option>
+                                ) : null}
+                              </Select>
+                            )}
+                          />
+                        </div>
+                      </div>
                       <div className="form-row items-center">
                         <label
                           htmlFor="overlay_template_id"
@@ -1663,7 +1697,9 @@ const AddModal = (props: AddModal) => {
                                   <option value="">
                                     {overlayTemplateMode === 'titlecard'
                                       ? t`Default title card template`
-                                      : t`Default poster template`}
+                                      : overlayTemplateMode === 'backdrop'
+                                        ? t`Default backdrop template`
+                                        : t`Default poster template`}
                                   </option>
                                   {availableOverlayTemplates.map((template) => (
                                     <option
@@ -1681,6 +1717,7 @@ const AddModal = (props: AddModal) => {
                           </div>
                         </div>
                       </div>
+                      </>
                     )}
 
                     {(radarrSettingsId != null ||
