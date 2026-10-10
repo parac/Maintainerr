@@ -15,6 +15,46 @@ export type OverlayTemplateMode = (typeof overlayTemplateModeValues)[number]
 export const overlayModeForType = (type: MediaItemType): OverlayTemplateMode =>
   type === 'episode' ? 'titlecard' : 'poster'
 
+/**
+ * A collection can draw on more than one artwork kind at once - a poster for
+ * the library grid and a backdrop for the landscape view clients like Infuse
+ * use. Stored comma separated so the column stays a plain varchar and a build
+ * that predates this still reads a valid single mode from `overlayMode`.
+ */
+export const parseOverlayModes = (
+  raw: string | null | undefined,
+): OverlayTemplateMode[] => {
+  if (!raw) return []
+  const out: OverlayTemplateMode[] = []
+  for (const part of raw.split(',')) {
+    const mode = part.trim()
+    if (
+      (overlayTemplateModeValues as readonly string[]).includes(mode) &&
+      !out.includes(mode as OverlayTemplateMode)
+    ) {
+      out.push(mode as OverlayTemplateMode)
+    }
+  }
+  return out
+}
+
+export const serializeOverlayModes = (
+  modes: readonly OverlayTemplateMode[] | null | undefined,
+): string | null => {
+  if (!modes?.length) return null
+  const unique = modes.filter((mode, i) => modes.indexOf(mode) === i)
+  return unique.length ? unique.join(',') : null
+}
+
+/**
+ * Which artwork kinds exist for an item. An episode only ever has a title
+ * card; everything else has a poster and may also have a backdrop.
+ */
+export const overlayModesForType = (
+  type: MediaItemType,
+): OverlayTemplateMode[] =>
+  type === 'episode' ? ['titlecard'] : ['poster', 'backdrop']
+
 // ── Canvas dimension defaults ─────────────────────────────────────────────
 
 export const POSTER_CANVAS = { width: 1000, height: 1500 } as const

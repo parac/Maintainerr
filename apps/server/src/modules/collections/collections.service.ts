@@ -4731,6 +4731,7 @@ export class CollectionsService {
             overlayEnabled: collection.overlayEnabled ?? false,
             overlayTemplateId: collection.overlayTemplateId ?? null,
             overlayMode: collection.overlayMode ?? null,
+            overlayModes: collection.overlayModes ?? null,
           },
         ])
         .execute();

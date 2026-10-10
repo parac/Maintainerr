@@ -76,6 +76,7 @@ export interface RuleGroupCollectionPayload {
   overlayEnabled?: boolean
   overlayTemplateId?: number | null
   overlayMode?: 'poster' | 'titlecard' | 'backdrop' | null
+  overlayModes?: string | null
   deleteAfterDays?: number
   manualCollection?: boolean
   manualCollectionName?: string

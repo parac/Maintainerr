@@ -43,4 +43,6 @@ export interface ICollection {
   overlayEnabled?: boolean;
   overlayTemplateId?: number | null;
   overlayMode?: 'poster' | 'titlecard' | 'backdrop' | null;
+  /** Comma-separated artwork kinds; null falls back to overlayMode. */
+  overlayModes?: string | null;
 }

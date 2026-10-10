@@ -20,7 +20,10 @@ import {
   MediaLibrary,
   MediaServerFeature,
   overlayModeForType,
+  overlayModesForType,
   OverlayTemplate,
+  OverlayTemplateMode,
+  parseOverlayModes,
   parseCollectionSortKey,
   ServarrAction,
   supportsFeature,
@@ -402,6 +405,10 @@ export const ruleGroupFormSchema = z
     overlayEnabled: z.boolean(),
     overlayTemplateId: z.number().int().nullable().optional(),
     overlayMode: z.enum(['poster', 'titlecard', 'backdrop']).nullable().optional(),
+    overlayModes: z
+      .array(z.enum(['poster', 'titlecard', 'backdrop']))
+      .nullable()
+      .optional(),
     listExclusions: z.boolean(),
     cleanupLeftoverFolders: z.boolean(),
     forceSeerr: z.boolean(),
@@ -504,6 +511,11 @@ const buildFormDefaults = (editData?: IRuleGroup): RuleGroupFormValues => ({
   overlayEnabled: editData?.collection?.overlayEnabled ?? false,
   overlayTemplateId: editData?.collection?.overlayTemplateId ?? null,
   overlayMode: editData?.collection?.overlayMode ?? null,
+  overlayModes: parseOverlayModes(editData?.collection?.overlayModes).length
+    ? parseOverlayModes(editData?.collection?.overlayModes)
+    : editData?.collection?.overlayMode
+      ? [editData.collection.overlayMode]
+      : null,
   listExclusions: editData?.collection?.listExclusions ?? true,
   cleanupLeftoverFolders: editData?.collection?.cleanupLeftoverFolders ?? false,
   forceSeerr: editData?.collection?.forceSeerr ?? false,
@@ -707,10 +719,17 @@ const AddModal = (props: AddModal) => {
   const [pendingDisableSubmit, setPendingDisableSubmit] =
     useState<RuleGroupFormOutput | null>(null)
 
-  const selectedOverlayMode = useWatch({ control, name: 'overlayMode' })
+  const selectedOverlayModes = useWatch({ control, name: 'overlayModes' })
+  // The collection holds one explicit template; it belongs to the first mode
+  // selected. Every other mode falls back to that mode's default template.
   const overlayTemplateMode = isValidMediaItemType(selectedType)
-    ? (selectedOverlayMode ?? overlayModeForType(selectedType))
+    ? (selectedOverlayModes?.[0] ?? overlayModeForType(selectedType))
     : 'poster'
+  const offeredOverlayModes: OverlayTemplateMode[] = isValidMediaItemType(
+    selectedType,
+  )
+    ? overlayModesForType(selectedType)
+    : ['poster']
   const availableOverlayTemplates = overlayTemplates.filter(
     (template) => template.mode === overlayTemplateMode,
   )
@@ -1079,7 +1098,10 @@ const AddModal = (props: AddModal) => {
         visibleOnHome: data.showHome,
         overlayEnabled: data.overlayEnabled,
         overlayTemplateId: data.overlayTemplateId ?? null,
-        overlayMode: data.overlayMode ?? null,
+        overlayMode: data.overlayModes?.[0] ?? data.overlayMode ?? null,
+        overlayModes: data.overlayModes?.length
+          ? data.overlayModes.join(',')
+          : null,
         deleteAfterDays:
           data.arrAction === undefined ||
           data.arrAction === ServarrAction.DO_NOTHING ||
@@ -1631,31 +1653,69 @@ const AddModal = (props: AddModal) => {
                     {overlayEnabled && (
                       <>
                       <div className="form-row items-center">
-                        <label htmlFor="overlay_mode" className="text-label">
-                          <Trans>Artwork target</Trans>
+                        <label htmlFor="overlay_modes" className="text-label">
+                          <Trans>Artwork targets</Trans>
                           <p className="text-xs font-normal">
-                            <Trans>Choose the artwork Infuse displays.</Trans>
+                            <Trans>
+                              Pick every artwork the overlay is drawn on. The
+                              poster shows in library grids, the backdrop in the
+                              landscape view clients like Infuse use.
+                            </Trans>
                           </p>
                         </label>
                         <div className="form-input">
                           <Controller
-                            name="overlayMode"
+                            name="overlayModes"
                             control={control}
-                            render={({ field }) => (
-                              <Select
-                                id="overlay_mode"
-                                value={field.value ?? overlayTemplateMode}
-                                onChange={(event) => field.onChange(event.target.value)}
-                              >
-                                <option value="poster">{t`Poster`}</option>
-                                {selectedType === 'movie' || selectedType === 'show' ? (
-                                  <option value="backdrop">{t`Backdrop`}</option>
-                                ) : null}
-                                {selectedType === 'episode' ? (
-                                  <option value="titlecard">{t`Title Card`}</option>
-                                ) : null}
-                              </Select>
-                            )}
+                            render={({ field }) => {
+                              const selected = field.value?.length
+                                ? field.value
+                                : [overlayTemplateMode]
+                              const labels: Record<
+                                OverlayTemplateMode,
+                                string
+                              > = {
+                                poster: t`Poster`,
+                                backdrop: t`Backdrop`,
+                                titlecard: t`Title Card`,
+                              }
+                              return (
+                                <div
+                                  id="overlay_modes"
+                                  className="flex flex-col gap-2"
+                                >
+                                  {offeredOverlayModes.map((mode) => (
+                                    <label
+                                      key={mode}
+                                      className="flex flex-row items-center gap-2 text-sm"
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        className="checkbox"
+                                        checked={selected.includes(mode)}
+                                        onChange={(event) => {
+                                          // Order matters: the first mode owns
+                                          // the explicitly chosen template.
+                                          const next = event.target.checked
+                                            ? offeredOverlayModes.filter(
+                                                (m) =>
+                                                  m === mode ||
+                                                  selected.includes(m),
+                                              )
+                                            : selected.filter((m) => m !== mode)
+                                          // Never leave it empty - the run
+                                          // would have nothing to draw.
+                                          field.onChange(
+                                            next.length ? next : [mode],
+                                          )
+                                        }}
+                                      />
+                                      <span>{labels[mode]}</span>
+                                    </label>
+                                  ))}
+                                </div>
+                              )
+                            }}
                           />
                         </div>
                       </div>

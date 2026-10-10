@@ -520,6 +520,8 @@ export class RulesService {
           mediaServerSort: params.collection?.mediaServerSort ?? null,
           overlayEnabled: params.collection?.overlayEnabled,
           overlayTemplateId: params.collection?.overlayTemplateId ?? null,
+          overlayMode: params.collection?.overlayMode ?? null,
+          overlayModes: params.collection?.overlayModes ?? null,
         })
       )?.dbCollection;
 
@@ -768,6 +770,8 @@ export class RulesService {
           mediaServerSort: params.collection?.mediaServerSort ?? null,
           overlayEnabled: params.collection?.overlayEnabled,
           overlayTemplateId: params.collection?.overlayTemplateId ?? null,
+          overlayMode: params.collection?.overlayMode ?? null,
+          overlayModes: params.collection?.overlayModes ?? null,
         };
 
         // If there's no existing collection (e.g., after rule migration), create a new one

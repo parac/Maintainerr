@@ -149,6 +149,14 @@ export class Collection {
   @Column({ type: 'varchar', nullable: true, default: null })
   overlayMode?: OverlayTemplateMode | null;
 
+  /**
+   * Every artwork kind this collection draws on, comma separated. Null falls
+   * back to the single `overlayMode` above, which stays in sync with the first
+   * entry so an older build still reads a valid mode.
+   */
+  @Column({ type: 'varchar', nullable: true, default: null })
+  overlayModes?: string | null;
+
   @ManyToOne(() => OverlayTemplateEntity, {
     nullable: true,
     onDelete: 'SET NULL',

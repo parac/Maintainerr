@@ -183,6 +183,27 @@ const collectionBaseShape = {
   overlayEnabled: z.boolean().optional(),
   overlayTemplateId: z.coerce.number().int().optional().nullable(),
   overlayMode: z.enum(['poster', 'titlecard', 'backdrop']).optional().nullable(),
+  // A plain comma-separated varchar so the column stays readable by a build
+  // that predates multi-artwork overlays, and the DTO matches the column.
+  overlayModes: z
+    .string()
+    .optional()
+    .nullable()
+    .refine(
+      (value) =>
+        value == null ||
+        value
+          .split(',')
+          .every((mode) =>
+            (['poster', 'titlecard', 'backdrop'] as string[]).includes(
+              mode.trim(),
+            ),
+          ),
+      {
+        message:
+          'overlayModes must be a comma-separated list of poster, titlecard or backdrop',
+      },
+    ),
 };
 
 export const collectionBodySchema = z.object({

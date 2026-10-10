@@ -6,6 +6,7 @@ import {
   OverlayProcessorRunResult,
   OverlayResult,
   overlayModeForType,
+  parseOverlayModes,
   OverlayTemplate,
   OverlayTemplateMode,
   ServarrAction,
@@ -128,10 +129,21 @@ export class OverlayProcessorService {
     );
   }
 
+  /**
+   * Every artwork kind this collection draws on. `overlayModes` wins when set;
+   * otherwise the legacy single `overlayMode` is the whole list.
+   */
+  private getOverlayModes(collection: Collection): OverlayTemplateMode[] {
+    const configured = parseOverlayModes(collection.overlayModes);
+    if (configured.length) return configured;
+    return [collection.overlayMode ?? overlayModeForType(collection.type)];
+  }
+
   private getMemberTargets(
     collection: Collection & { collectionMedia: CollectionMedia[] },
+    mode: OverlayTemplateMode = collection.overlayMode ??
+      overlayModeForType(collection.type),
   ): OverlayTarget[] {
-    const mode = collection.overlayMode ?? overlayModeForType(collection.type);
     const targets: OverlayTarget[] = [];
     for (const media of collection.collectionMedia) {
       const deleteDate = getCollectionDeleteDate(
@@ -746,46 +758,48 @@ export class OverlayProcessorService {
       return result;
     }
 
-    const mode = collection.overlayMode ?? overlayModeForType(collection.type);
+    const modes = this.getOverlayModes(collection);
 
-    // Resolve the template: collection override → default for mode → null
-    const template = await this.templateService.resolveForCollection(
-      collection.overlayTemplateId ?? null,
-      mode,
-    );
-
-    if (!template) {
-      this.logger.warn(
-        `No overlay template found for collection "${collection.title}" (mode=${mode}). ` +
-          `Set a default template or assign one to this collection.`,
+    // One template per artwork kind - a 1000x1500 poster template cannot
+    // render onto a 1920x1080 backdrop - resolved once each and reused.
+    const templateCache = new Map<OverlayTemplateMode, OverlayTemplate | null>();
+    const templateFor = async (
+      templateMode: OverlayTemplateMode,
+    ): Promise<OverlayTemplate | null> => {
+      const cached = templateCache.get(templateMode);
+      if (cached !== undefined) return cached;
+      // Resolve the template: collection override → default for mode → null
+      const resolved = await this.templateService.resolveForCollection(
+        collection.overlayTemplateId ?? null,
+        templateMode,
       );
-      return result;
+      if (!resolved) {
+        this.logger.warn(
+          `No overlay template found for collection "${collection.title}" (mode=${templateMode}). ` +
+            `Set a default template or assign one to this collection.`,
+        );
+      }
+      templateCache.set(templateMode, resolved);
+      return resolved;
+    };
+
+    const memberTemplates = new Map<OverlayTemplateMode, OverlayTemplate>();
+    for (const memberMode of modes) {
+      const resolved = await templateFor(memberMode);
+      if (resolved) memberTemplates.set(memberMode, resolved);
     }
 
+    if (memberTemplates.size === 0) return result;
+
     this.logger.log(
-      `Collection "${collection.title}" using template "${template.name}" (${mode})`,
+      `Collection "${collection.title}" using ${[...memberTemplates]
+        .map(([memberMode, tpl]) => `"${tpl.name}" (${memberMode})`)
+        .join(' + ')}`,
     );
 
     const inheritedTargets =
       options.inheritedTargets ??
       (await this.collectInheritedTargets(collection)).targets;
-
-    // Inherited items are not always of the collection's own kind, and one
-    // template cannot render onto both posters and stills.
-    const otherMode: OverlayTemplateMode =
-      mode === 'poster' ? 'titlecard' : 'poster';
-    let otherTemplate: OverlayTemplate | null = null;
-    if (inheritedTargets.some((target) => target.mode === otherMode)) {
-      otherTemplate = await this.templateService.resolveForCollection(
-        collection.overlayTemplateId ?? null,
-        otherMode,
-      );
-      if (!otherTemplate) {
-        this.logger.warn(
-          `No ${otherMode} overlay template found, skipping the inherited ${otherMode} items of "${collection.title}"`,
-        );
-      }
-    }
 
     if (inheritedTargets.length > 0) {
       this.logger.log(
@@ -794,17 +808,34 @@ export class OverlayProcessorService {
     }
 
     const targets: (OverlayTarget & { template: OverlayTemplate })[] = [];
-    for (const member of this.getMemberTargets(collection)) {
-      targets.push({ ...member, template });
+    for (const [memberMode, memberTemplate] of memberTemplates) {
+      for (const member of this.getMemberTargets(collection, memberMode)) {
+        targets.push({ ...member, template: memberTemplate });
+      }
     }
     for (const inherited of inheritedTargets) {
-      const inheritedTemplate =
-        inherited.mode === mode ? template : otherTemplate;
-      if (!inheritedTemplate) {
-        result.skipped++;
-        continue;
+      // Inherited items are not always of the collection's own kind: a season
+      // collection drags episodes (title cards) and emptied shows (posters)
+      // with it. Each takes the kinds that exist for its own artwork - an
+      // episode has no backdrop - so the template always matches the canvas.
+      const applicable =
+        inherited.mode === 'titlecard'
+          ? (['titlecard'] as OverlayTemplateMode[])
+          : modes.filter((m) => m !== 'titlecard');
+      for (const inheritedMode of applicable.length
+        ? applicable
+        : [inherited.mode]) {
+        const inheritedTemplate = await templateFor(inheritedMode);
+        if (!inheritedTemplate) {
+          result.skipped++;
+          continue;
+        }
+        targets.push({
+          ...inherited,
+          mode: inheritedMode,
+          template: inheritedTemplate,
+        });
       }
-      targets.push({ ...inherited, template: inheritedTemplate });
     }
 
     for (const target of targets) {

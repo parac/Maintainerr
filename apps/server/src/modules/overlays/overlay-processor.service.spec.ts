@@ -1660,6 +1660,143 @@ describe('OverlayProcessorService', () => {
 
     expect(eventEmitter.emit).not.toHaveBeenCalled();
   });
+  it('draws every artwork kind a collection selects, each with its own template', async () => {
+    const settingsService = {
+      getSettings: jest.fn().mockResolvedValue({ enabled: true }),
+    };
+    const stateService = { getItemState: jest.fn().mockResolvedValue(null) };
+    const posterTemplate = makeTemplate({ id: 1, mode: 'poster' });
+    const backdropTemplate = makeTemplate({
+      id: 2,
+      name: 'Backdrop banner',
+      mode: 'backdrop',
+      canvasWidth: 1920,
+      canvasHeight: 1080,
+    });
+    const templateService = {
+      resolveForCollection: jest
+        .fn()
+        .mockImplementation((_id: number | null, mode: OverlayTemplateMode) =>
+          Promise.resolve(
+            mode === 'backdrop' ? backdropTemplate : posterTemplate,
+          ),
+        ),
+    };
+    const provider = makeProvider();
+
+    const service = new OverlayProcessorService(
+      makeProviderFactory(provider) as any,
+      makeMediaServerFactory() as any,
+      {} as any,
+      {} as any,
+      settingsService as any,
+      stateService as any,
+      {} as any,
+      templateService as any,
+      { emit: jest.fn() } as any,
+      createMockLogger(),
+      new ExecutionLockService(),
+    );
+
+    const collection = createCollection({
+      id: 1,
+      title: 'Poster and backdrop',
+      type: 'movie',
+      deleteAfterDays: 7,
+      overlayTemplateId: null,
+      overlayMode: 'poster',
+      overlayModes: 'poster,backdrop',
+    } as any);
+    collection.collectionMedia = [
+      createCollectionMedia(collection, {
+        mediaServerId: 'movie-1',
+        addDate: new Date('2026-04-01T00:00:00.000Z'),
+      }),
+    ];
+
+    jest.spyOn(service, 'applyTemplateOverlay').mockResolvedValue(true);
+
+    await service.processCollection(collection as any);
+
+    expect(templateService.resolveForCollection).toHaveBeenCalledWith(
+      null,
+      'poster',
+    );
+    expect(templateService.resolveForCollection).toHaveBeenCalledWith(
+      null,
+      'backdrop',
+    );
+    // The same item is drawn once per selected artwork kind.
+    expect(service.applyTemplateOverlay).toHaveBeenCalledTimes(2);
+    expect(service.applyTemplateOverlay).toHaveBeenCalledWith(
+      'movie-1',
+      collection.id,
+      expect.any(Date),
+      posterTemplate,
+      provider,
+    );
+    expect(service.applyTemplateOverlay).toHaveBeenCalledWith(
+      'movie-1',
+      collection.id,
+      expect.any(Date),
+      backdropTemplate,
+      provider,
+    );
+  });
+
+  it('falls back to the single overlayMode when no mode list is stored', async () => {
+    const settingsService = {
+      getSettings: jest.fn().mockResolvedValue({ enabled: true }),
+    };
+    const stateService = { getItemState: jest.fn().mockResolvedValue(null) };
+    const backdropTemplate = makeTemplate({ id: 2, mode: 'backdrop' });
+    const templateService = {
+      resolveForCollection: jest.fn().mockResolvedValue(backdropTemplate),
+    };
+    const provider = makeProvider();
+
+    const service = new OverlayProcessorService(
+      makeProviderFactory(provider) as any,
+      makeMediaServerFactory() as any,
+      {} as any,
+      {} as any,
+      settingsService as any,
+      stateService as any,
+      {} as any,
+      templateService as any,
+      { emit: jest.fn() } as any,
+      createMockLogger(),
+      new ExecutionLockService(),
+    );
+
+    const collection = createCollection({
+      id: 1,
+      title: 'Legacy single mode',
+      type: 'movie',
+      deleteAfterDays: 7,
+      overlayTemplateId: null,
+      overlayMode: 'backdrop',
+      overlayModes: null,
+    } as any);
+    collection.collectionMedia = [
+      createCollectionMedia(collection, {
+        mediaServerId: 'movie-1',
+        addDate: new Date('2026-04-01T00:00:00.000Z'),
+      }),
+    ];
+
+    jest.spyOn(service, 'applyTemplateOverlay').mockResolvedValue(true);
+
+    await service.processCollection(collection as any);
+
+    expect(templateService.resolveForCollection).toHaveBeenCalledTimes(1);
+    expect(templateService.resolveForCollection).toHaveBeenCalledWith(
+      null,
+      'backdrop',
+    );
+    expect(service.applyTemplateOverlay).toHaveBeenCalledTimes(1);
+  });
+
   describe('overlay inheritance', () => {
     const seasonCollection = (arrAction = ServarrAction.DELETE) => {
       const collection = createCollection({

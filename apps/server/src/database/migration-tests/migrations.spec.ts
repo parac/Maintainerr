@@ -186,6 +186,10 @@ describe('database migrations', () => {
       expect(settings.ombi_url).toMatchObject(nullableVarchar);
       expect(settings.ombi_api_key).toMatchObject(nullableVarchar);
       expect(collection.forceOmbi).toMatchObject(bool);
+
+      // AddOverlayModesToCollection: every artwork kind the overlay is drawn
+      // on, comma separated. Null falls back to the single overlayMode.
+      expect(collection.overlayModes).toMatchObject(nullableVarchar);
     } finally {
       await ds.destroy();
     }
@@ -198,8 +202,8 @@ describe('database migrations', () => {
     // emits a full create-temporary-table / copy / drop / rename rebuild for the
     // changed tables. A hand-written ALTER shortcut lacks it - this is the
     // cheapest signal the migration was generated rather than authored. The
-    // newest migration adds settings columns, so it rebuilds that table.
-    expect(src).toContain('CREATE TABLE "temporary_settings"');
+    // newest migration adds a collection column, so it rebuilds that table.
+    expect(src).toContain('CREATE TABLE "temporary_collection"');
   });
 
   // The rebuild in (3) drops and recreates the tables, so its INSERT...SELECT is
@@ -236,6 +240,8 @@ describe('database migrations', () => {
         title: 'Sample Collection',
         forceSeerr: 1,
         forceOmbi: 0,
+        // No overlayMode on the existing row, so nothing to carry over.
+        overlayModes: null,
       });
     } finally {
       await ds.destroy();
@@ -250,16 +256,17 @@ describe('database migrations', () => {
     const ds = await makeDS(all.map((m) => m.cls)).initialize();
     try {
       await ds.runMigrations();
-      expect(byName(await columns(ds, 'settings')).ombi_url).toBeDefined();
-      expect(byName(await columns(ds, 'collection')).forceOmbi).toBeDefined();
+      expect(byName(await columns(ds, 'collection')).overlayModes).toBeDefined();
       await ds.query(
         `INSERT INTO settings ("id", "applicationTitle", "applicationUrl", "locale", "metadata_provider_preference") VALUES (1, 'Fresh', 'http://localhost:6246', 'en', 'tmdb_primary')`,
       );
 
       await ds.undoLastMigration();
 
-      expect(byName(await columns(ds, 'settings')).ombi_url).toBeUndefined();
-      expect(byName(await columns(ds, 'collection')).forceOmbi).toBeUndefined();
+      expect(byName(await columns(ds, 'collection')).overlayModes).toBeUndefined();
+      // Only the newest migration is undone; the one before it stays applied.
+      expect(byName(await columns(ds, 'settings')).ombi_url).toBeDefined();
+      expect(byName(await columns(ds, 'collection')).forceOmbi).toBeDefined();
       const [row] = await ds.query(`SELECT "applicationTitle" FROM settings`);
       expect(row.applicationTitle).toBe('Fresh');
       const [{ c }] = await ds.query(`SELECT COUNT(*) AS c FROM migrations`);
