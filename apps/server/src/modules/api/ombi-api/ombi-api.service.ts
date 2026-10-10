@@ -1,6 +1,7 @@
 import { BasicResponseDto, stripTrailingSlashes } from '@maintainerr/contracts';
 import { Injectable } from '@nestjs/common';
 import { cloneDeep } from 'lodash';
+import { assertApiKey, connectionTestConfig } from '../lib/connectionTest';
 import { SettingsDataService } from '../../../modules/settings/settings-data.service';
 import {
   formatConnectionFailureMessage,
@@ -11,7 +12,6 @@ import {
   MaintainerrLoggerFactory,
 } from '../../logging/logs.service';
 import cacheManager from '../lib/cache';
-import { CONNECTION_TEST_TIMEOUT_MS } from '../lib/httpTimeouts';
 import { OmbiApi } from './helpers/ombi-api.helper';
 import {
   OMBI_REQUESTS_CACHE_ID,
@@ -74,6 +74,7 @@ export interface OmbiTvRequest {
 }
 
 interface OmbiSearchResult {
+  id: number;
   requestId: number;
 }
 
@@ -315,23 +316,21 @@ export class OmbiApiService {
       : this.api;
 
     try {
+      assertApiKey(params ? params.apiKey : this.settings.ombi_api_key);
       const response = await api.getRawWithoutCache<OmbiAbout>(
         '/v1/Settings/about',
-        { signal: AbortSignal.timeout(CONNECTION_TEST_TIMEOUT_MS) },
+        connectionTestConfig(),
       );
 
       if (!response.data?.version) {
-        return {
-          status: 'NOK',
-          code: 0,
-          message:
-            'Failure, an unexpected response was returned. The URL is likely incorrect.',
-        };
+        throw new Error(
+          'Failure, an unexpected response was returned. The URL is likely incorrect.',
+        );
       }
 
       return { status: 'OK', code: 1, message: response.data.version };
     } catch (error) {
-      logConnectionTestError(this.logger, 'Ombi');
+      logConnectionTestError(this.logger, 'Ombi', error);
 
       return {
         status: 'NOK',
@@ -345,6 +344,9 @@ export class OmbiApiService {
   }
 
   private async getRequestIndex(): Promise<OmbiRequestIndex | undefined> {
+    if (!this.api) {
+      return undefined;
+    }
     const cache = cacheManager.getCache(OMBI_REQUESTS_CACHE_ID)?.data;
     const cached = cache?.get<OmbiRequestIndex>(OMBI_REQUESTS_CACHE_KEY);
     if (cached) {
@@ -390,7 +392,11 @@ export class OmbiApiService {
     return index;
   }
 
-  /** Only the search view maps a TMDB id to Ombi's request id; 0 = unrequested. */
+  /**
+   * Only the search view maps a TMDB id to Ombi's request id; 0 = unrequested.
+   * It echoes the id it resolved, and a title Ombi's own TMDB lookup could not
+   * resolve answers with id 0 - unknown, not unrequested.
+   */
   private async findRequestId(
     tmdbId: number,
     type: OmbiRequestType,
@@ -400,7 +406,7 @@ export class OmbiApiService {
         ? `/v2/Search/movie/${tmdbId}`
         : `/v2/Search/tv/moviedb/${tmdbId}`,
     );
-    return result ? (result.requestId ?? 0) : undefined;
+    return result?.id === tmdbId ? result.requestId : undefined;
   }
 
   private async getChildRequests(

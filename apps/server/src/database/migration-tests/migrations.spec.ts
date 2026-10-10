@@ -102,12 +102,14 @@ describe('database migrations', () => {
       // SQLite reports INTEGER affinity uppercased via PRAGMA table_info.
       const intNullable = { type: 'INTEGER', notnull: 0, dflt_value: null };
       expect(collection.tagInArr).toMatchObject(bool);
-      expect(settings.radarr_tag_exclusions).toMatchObject(bool);
-      expect(settings.radarr_exclusion_tag).toMatchObject(dnd);
-      expect(settings.radarr_untag_on_unexclude).toMatchObject(bool);
-      expect(settings.sonarr_tag_exclusions).toMatchObject(bool);
-      expect(settings.sonarr_exclusion_tag).toMatchObject(dnd);
-      expect(settings.sonarr_untag_on_unexclude).toMatchObject(bool);
+      // MoveExclusionTagToServers: the exclusion tag is set per server.
+      expect(settings.radarr_tag_exclusions).toBeUndefined();
+      for (const table of ['radarr_settings', 'sonarr_settings']) {
+        const server = byName(await columns(ds, table));
+        expect(server.tagExclusions).toMatchObject(bool);
+        expect(server.exclusionTag).toMatchObject(dnd);
+        expect(server.untagOnUnexclude).toMatchObject(bool);
+      }
 
       // AddCollectionMediaRuleRemoval: the rule-removal marker table columns.
       const ruleRemoval = byName(
@@ -219,11 +221,18 @@ describe('database migrations', () => {
         `INSERT INTO settings ("id", "applicationTitle", "applicationUrl", "locale", "metadata_provider_preference", "seerr_url", "seerr_api_key") VALUES (1, 'Media Manager', 'http://localhost:6246', 'en', 'tmdb_primary', 'http://seerr.local', 'seerr-key')`,
       );
       await ds.query(
-        `INSERT INTO collection ("libraryId", "title", "type", "forceSeerr", "mediaServerType") VALUES ('1', 'Sample Collection', 'movie', 1, 'plex')`,
+        `INSERT INTO radarr_settings ("id", "serverName") VALUES (1, 'HD')`,
+      );
+      await ds.query(
+        `INSERT INTO collection ("libraryId", "title", "type", "mediaServerType", "radarrSettingsId") VALUES ('1', 'Sample Collection', 'movie', 'plex', 1)`,
       );
 
+      // Wrapped as the migration executor does, which turns foreign keys off
+      // so a rebuilt table may be one that other rows reference.
       const runner = ds.createQueryRunner();
+      await runner.beforeMigration();
       await new newest.cls().up(runner);
+      await runner.afterMigration();
       await runner.release();
 
       const [settings] = await ds.query(`SELECT * FROM settings`);
@@ -231,15 +240,11 @@ describe('database migrations', () => {
         applicationTitle: 'Media Manager',
         seerr_url: 'http://seerr.local',
         seerr_api_key: 'seerr-key',
-        ombi_url: null,
-        ombi_api_key: null,
       });
-      // The existing toggle is carried; the new one starts off.
       const [collection] = await ds.query(`SELECT * FROM collection`);
       expect(collection).toMatchObject({
         title: 'Sample Collection',
-        forceSeerr: 1,
-        forceOmbi: 0,
+        radarrSettingsId: 1,
         // No overlayMode on the existing row, so nothing to carry over.
         overlayModes: null,
       });
@@ -257,16 +262,23 @@ describe('database migrations', () => {
     try {
       await ds.runMigrations();
       expect(byName(await columns(ds, 'collection')).overlayModes).toBeDefined();
+      expect(
+        byName(await columns(ds, 'settings')).radarr_tag_exclusions,
+      ).toBeUndefined();
       await ds.query(
         `INSERT INTO settings ("id", "applicationTitle", "applicationUrl", "locale", "metadata_provider_preference") VALUES (1, 'Fresh', 'http://localhost:6246', 'en', 'tmdb_primary')`,
       );
 
       await ds.undoLastMigration();
 
-      expect(byName(await columns(ds, 'collection')).overlayModes).toBeUndefined();
-      // Only the newest migration is undone; the one before it stays applied.
-      expect(byName(await columns(ds, 'settings')).ombi_url).toBeDefined();
-      expect(byName(await columns(ds, 'collection')).forceOmbi).toBeDefined();
+      expect(
+        byName(await columns(ds, 'collection')).overlayModes,
+      ).toBeUndefined();
+      // Only the newest migration is undone; the one before it stays applied,
+      // so the settings columns it moved onto the servers are still gone.
+      expect(
+        byName(await columns(ds, 'settings')).radarr_tag_exclusions,
+      ).toBeUndefined();
       const [row] = await ds.query(`SELECT "applicationTitle" FROM settings`);
       expect(row.applicationTitle).toBe('Fresh');
       const [{ c }] = await ds.query(`SELECT COUNT(*) AS c FROM migrations`);

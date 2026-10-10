@@ -852,9 +852,6 @@ export class OverlayProcessorService {
         force || !existingState || existingState.daysLeftShown !== daysLeft;
 
       if (shouldApply) {
-        this.logger.log(
-          `Applying template overlay to item ${itemId} - ${daysLeft} day(s) left`,
-        );
         const success = await this.applyTemplateOverlay(
           itemId,
           collection.id,
@@ -862,7 +859,12 @@ export class OverlayProcessorService {
           target.template,
           provider,
         );
-        if (success) {
+        if (success === 'unchanged') {
+          result.skipped++;
+        } else if (success) {
+          this.logger.log(
+            `Applied template overlay to item ${itemId} - ${daysLeft} day(s) left`,
+          );
           result.processed++;
           this.addUniqueMediaItem(processedMediaItems, itemId);
         } else {
@@ -1178,7 +1180,7 @@ export class OverlayProcessorService {
     deleteDate: Date,
     template: OverlayTemplate,
     provider: IOverlayProvider,
-  ): Promise<boolean> {
+  ): Promise<boolean | 'unchanged'> {
     let posterBuf: Buffer | undefined;
     const mode = template.mode;
     const savedOriginal =
@@ -1258,13 +1260,24 @@ export class OverlayProcessorService {
       return false;
     }
 
+    const rendered = Buffer.from(result.buffer);
+    let unchanged = false;
+    if (savedOriginal) {
+      try {
+        // Read current artwork so a forced run can still repair external
+        // changes. It must be the kind this template draws on: a poster that
+        // is already current must not suppress a backdrop upload that is not.
+        const current = await provider.downloadImage(itemId, mode);
+        unchanged = current?.equals(rendered) ?? false;
+      } catch (error) {
+        this.logger.debug(error);
+      }
+    }
+
     try {
-      await provider.uploadImage(
-        itemId,
-        Buffer.from(result.buffer),
-        result.contentType,
-        mode,
-      );
+      if (!unchanged) {
+        await provider.uploadImage(itemId, rendered, result.contentType, mode);
+      }
       await this.stateService.markProcessed(
         collectionId,
         itemId,
@@ -1274,7 +1287,7 @@ export class OverlayProcessorService {
         daysLeft,
         mode,
       );
-      return true;
+      return unchanged ? 'unchanged' : true;
     } catch (error) {
       this.logger.warn(
         `Failed to apply ${mode} template overlay for ${itemId}: ${error instanceof Error ? error.message : String(error)}`,

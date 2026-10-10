@@ -280,27 +280,6 @@ describe('TracearrApiService', () => {
     ).toEqual(['Unknown']);
   });
 
-  it('invalidates a prefetched history snapshot', async () => {
-    apiMock.getWithoutCache.mockImplementation(async (endpoint: string) => {
-      if (endpoint === '/recently-added') {
-        return CONFIRMING_LIBRARY;
-      }
-      if (endpoint === '/history') {
-        return {
-          data: [historyRow('33333333-3333-4333-8333-333333333333', 'movie-1')],
-          meta: { nextCursor: null, pageSize: 100 },
-        };
-      }
-      return usersPage;
-    });
-
-    await service.prefetchHistory();
-    service.invalidateHistory();
-
-    expect(service.getHistoryIndex()).toBeUndefined();
-    expect(service.getUsernamesByTracearrUserId()).toBeUndefined();
-  });
-
   it('stops an incremental sweep after it reaches a previously indexed chain', async () => {
     const known = historyRow('33333333-3333-4333-8333-333333333333', 'movie-1');
     const newer = historyRow('44444444-4444-4444-8444-444444444444', 'movie-2');
@@ -417,25 +396,6 @@ describe('TracearrApiService', () => {
     await service.prefetchHistory();
 
     expect(service.getHistoryIndex()?.rowsById.has(unfinished.id)).toBe(false);
-  });
-
-  it('memoizes each show episode catalog for a run', async () => {
-    const mediaServer = {
-      getUsers: jest
-        .fn()
-        .mockResolvedValue([{ id: 'account-1', name: 'alice' }]),
-      getChildrenMetadata: jest
-        .fn()
-        .mockResolvedValueOnce([{ id: 'season-1', type: 'season' }])
-        .mockResolvedValueOnce([{ id: 'episode-1', type: 'episode' }]),
-    };
-    mediaServerFactory.getService.mockResolvedValue(mediaServer as never);
-    const show = { id: 'show-1', type: 'show' } as never;
-
-    await expect(service.getEpisodeIds(show)).resolves.toEqual(['episode-1']);
-    await expect(service.getEpisodeIds(show)).resolves.toEqual(['episode-1']);
-
-    expect(mediaServer.getChildrenMetadata).toHaveBeenCalledTimes(2);
   });
 
   it('does not expose an index after a later cursor page fails', async () => {
@@ -983,21 +943,6 @@ describe('TracearrApiService', () => {
     });
   });
 
-  it('accepts the stable release after 2.0.0-beta.1', async () => {
-    apiMock.getRawWithoutCache.mockResolvedValue({
-      data: {
-        openapi: '3.1.0',
-        info: { title: 'Tracearr Public API', version: '2.0.0' },
-      },
-    });
-
-    await expect(
-      service.testConnection({
-        url: 'http://tracearr.local',
-        apiKey: 'trr_pub_token',
-      }),
-    ).resolves.toEqual({ status: 'OK', code: 1, message: '2.0.0' });
-  });
   describe('getItemStats', () => {
     const MEDIA_ID = '55555555-5555-4555-8555-555555555555';
     const SHOW_MEDIA_ID = '66666666-6666-4666-8666-666666666666';
@@ -1011,16 +956,35 @@ describe('TracearrApiService', () => {
       user: { id: USER_ID, username: 'alice' },
       ...overrides,
     });
+    const SEASON_MEDIA_ID = '77777777-7777-4777-8777-777777777777';
+    const confirmingItem = {
+      title: 'Confirming Title',
+      addedAt: new Date('2026-01-01T00:00:00.000Z'),
+    };
     const useItem = (item: Record<string, unknown>) =>
       mediaServerFactory.getService.mockResolvedValue({
-        getMetadata: jest.fn(async () => item),
+        getMetadata: jest.fn(async (id: string) =>
+          id.startsWith('confirm-') ? confirmingItem : item,
+        ),
       } as never);
     const answerHistory = (rows: unknown[]) =>
       apiMock.getRawWithoutCache.mockImplementation(async (path: string) =>
         path === '/history'
           ? { data: { data: rows, meta: { nextCursor: null } } }
-          : { data: { id: SHOW_MEDIA_ID } },
+          : path === `/media/${SHOW_MEDIA_ID}/children`
+            ? { data: { data: [{ id: SEASON_MEDIA_ID, season_number: 2 }] } }
+            : { data: { id: SHOW_MEDIA_ID } },
       );
+    const recentlyAddedCalls = () =>
+      apiMock.getWithoutCache.mock.calls.filter(
+        ([endpoint]) => endpoint === '/recently-added',
+      ).length;
+
+    beforeEach(() => {
+      apiMock.getWithoutCache.mockImplementation(async (endpoint: string) =>
+        endpoint === '/recently-added' ? CONFIRMING_LIBRARY : undefined,
+      );
+    });
 
     it('totals a movie from the plays carrying its rating key', async () => {
       useItem({ id: 'movie-1', type: 'movie' });
@@ -1071,6 +1035,40 @@ describe('TracearrApiService', () => {
       expect(apiMock.getRawWithoutCache).toHaveBeenCalledWith(
         '/media/show:tvdb:1234',
       );
+      expect(apiMock.getRawWithoutCache).toHaveBeenCalledWith('/history', {
+        params: {
+          media_id: SEASON_MEDIA_ID,
+          server_id: SERVER_ID,
+          pageSize: 100,
+        },
+      });
+    });
+
+    it('confirms the server once, and reads nothing from an unconfirmed one for a while', async () => {
+      useItem({ id: 'movie-1', type: 'movie' });
+      answerHistory([play()]);
+
+      await service.getItemStats('movie-1');
+      await service.getItemStats('movie-1');
+      expect(recentlyAddedCalls()).toBe(1);
+
+      service.invalidateHistory();
+      apiMock.getWithoutCache.mockClear();
+      apiMock.getWithoutCache.mockResolvedValue(undefined);
+      apiMock.getRawWithoutCache.mockClear();
+      const now = jest.spyOn(Date, 'now').mockReturnValue(1_000_000);
+      try {
+        await expect(service.getItemStats('movie-1')).resolves.toBeUndefined();
+        await expect(service.getItemStats('movie-1')).resolves.toBeUndefined();
+        expect(recentlyAddedCalls()).toBe(1);
+        expect(apiMock.getRawWithoutCache).not.toHaveBeenCalled();
+
+        now.mockReturnValue(1_000_000 + 60_000);
+        await service.getItemStats('movie-1');
+        expect(recentlyAddedCalls()).toBe(2);
+      } finally {
+        now.mockRestore();
+      }
     });
 
     it('answers null for an item nobody played and undefined when unreadable', async () => {

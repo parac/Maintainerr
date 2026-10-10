@@ -2,12 +2,12 @@ import { BasicResponseDto, MediaWatchStats } from '@maintainerr/contracts';
 import { Injectable } from '@nestjs/common';
 import { AxiosError } from 'axios';
 import { unionBy } from 'lodash';
+import { assertApiKey, connectionTestConfig } from '../lib/connectionTest';
 import { SettingsDataService } from '../../..//modules/settings/settings-data.service';
 import {
   formatConnectionFailureMessage,
   logConnectionTestError,
 } from '../../../utils/connection-error';
-import { CONNECTION_TEST_TIMEOUT_MS } from '../lib/httpTimeouts';
 import {
   MaintainerrLogger,
   MaintainerrLoggerFactory,
@@ -159,38 +159,18 @@ export class TautulliApiService {
     );
   }
 
-  public async info(): Promise<Response<TautulliInfo> | null> {
-    try {
-      const response: Response<TautulliInfo> = await this.api.getWithoutCache(
-        '',
-        {
-          signal: AbortSignal.timeout(CONNECTION_TEST_TIMEOUT_MS),
-          params: {
-            cmd: 'get_tautulli_info',
-          },
-        },
-      );
-      return response;
-    } catch (error) {
-      this.logger.log("Couldn't fetch Tautulli info");
-      this.logger.debug(error);
-      return null;
-    }
-  }
-
   public async getPaginatedHistory(
     options?: TautulliHistoryRequestOptions,
+    useCache = true,
   ): Promise<TautulliHistory | null> {
     try {
       options.length = options.length ? options.length : MAX_PAGE_SIZE;
       options.start = options.start || options.start === 0 ? options.start : 0;
 
-      const response: Response<TautulliHistory> = await this.api.get('', {
-        params: {
-          cmd: 'get_history',
-          ...options,
-        },
-      });
+      const request = { params: { cmd: 'get_history', ...options } };
+      const response: Response<TautulliHistory> = useCache
+        ? await this.api.get('', request)
+        : await this.api.getWithoutCache('', request);
 
       if (response.response.result !== 'success') {
         throw new Error(
@@ -318,15 +298,19 @@ export class TautulliApiService {
     }
   }
 
-  /** Null when nobody played the item, undefined when that could not be read. */
+  /**
+   * Null when nobody played the item, undefined when that could not be read.
+   * Read past the 20-minute cache, so reopening an item shows its plays as they
+   * are now.
+   */
   public async getItemStats(
     ratingKey: string,
   ): Promise<MediaWatchStats | null | undefined> {
     try {
-      const response: Response<TautulliItemUserStats[]> = await this.api.get(
-        '',
-        { params: { cmd: 'get_item_user_stats', rating_key: ratingKey } },
-      );
+      const response: Response<TautulliItemUserStats[]> =
+        await this.api.getWithoutCache('', {
+          params: { cmd: 'get_item_user_stats', rating_key: ratingKey },
+        });
 
       if (response.response.result !== 'success') {
         throw new Error(
@@ -367,12 +351,10 @@ export class TautulliApiService {
       return null;
     }
 
-    const history = await this.getPaginatedHistory({
-      ...scope,
-      order_column: 'date',
-      order_dir: 'desc',
-      length: 1,
-    });
+    const history = await this.getPaginatedHistory(
+      { ...scope, order_column: 'date', order_dir: 'desc', length: 1 },
+      false,
+    );
     const stopped = history?.data[0]?.stopped;
     return stopped ? new Date(stopped * 1000).toISOString() : null;
   }
@@ -409,10 +391,11 @@ export class TautulliApiService {
     );
 
     try {
+      assertApiKey(params.apiKey);
       const response = await api.getRawWithoutCache<
         Response<TautulliInfo> | string | undefined
       >('', {
-        signal: AbortSignal.timeout(CONNECTION_TEST_TIMEOUT_MS),
+        ...connectionTestConfig(),
         params: {
           cmd: 'get_tautulli_info',
         },
@@ -428,13 +411,10 @@ export class TautulliApiService {
             ? response.data.response?.message
             : undefined;
 
-        return {
-          status: 'NOK',
-          code: 0,
-          message:
-            message ??
+        throw new Error(
+          message ??
             'Failure, an unexpected response was returned. The URL is likely incorrect.',
-        };
+        );
       } else {
         return {
           status: 'OK',
@@ -443,7 +423,7 @@ export class TautulliApiService {
         };
       }
     } catch (error) {
-      logConnectionTestError(this.logger, 'Tautulli');
+      logConnectionTestError(this.logger, 'Tautulli', error);
 
       if (error instanceof AxiosError) {
         if (error.response?.status === 400) {

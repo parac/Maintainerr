@@ -10,6 +10,7 @@ import { MaintainerrLogger } from '../logging/logs.service';
 import { MetadataService } from '../metadata/metadata.service';
 import { SettingsDataService } from '../settings/settings-data.service';
 import { CollectionsService } from './collections.service';
+import { ArrLookupCache } from '../rules/helpers/arr-lookup-cache';
 import { Collection } from './entities/collection.entities';
 import { CollectionMedia } from './entities/collection_media.entities';
 import { ServarrAction } from './interfaces/collection.interface';
@@ -70,6 +71,7 @@ export class CollectionHandler {
   public async handleMedia(
     collection: Collection,
     media: CollectionMedia,
+    libraryReads?: ArrLookupCache,
   ): Promise<HandleMediaResult> {
     if (collection.arrAction === ServarrAction.DO_NOTHING) {
       return 'failed';
@@ -114,17 +116,28 @@ export class CollectionHandler {
         ? await this.resolveFolder(mediaServer, media.mediaServerId)
         : undefined;
 
+    // Requests are removed per season, and a delete through the media server
+    // takes the season's metadata with it: read its number first.
+    const forceSeerr = this.settings.seerrConfigured() && collection.forceSeerr;
+    const forceOmbi = this.settings.ombiConfigured() && collection.forceOmbi;
+    const seasonIndex =
+      freesDisk && collection.type === 'season' && (forceSeerr || forceOmbi)
+        ? (await mediaServer.getMetadata(media.mediaServerId))?.index
+        : undefined;
+
     let actionHandled = false;
 
     if (library?.type === 'movie' && collection.radarrSettingsId) {
       actionHandled = await this.radarrActionHandler.handleAction(
         collection,
         media,
+        libraryReads,
       );
     } else if (library?.type == 'show' && collection.sonarrSettingsId) {
       actionHandled = await this.sonarrActionHandler.handleAction(
         collection,
         media,
+        libraryReads,
       );
     } else if (library?.type == 'show' && collection.sportarrSettingsId) {
       actionHandled = await this.sportarrActionHandler.handleAction(
@@ -170,12 +183,17 @@ export class CollectionHandler {
       // skips 404, Jellyfin/Emby return 2xx), so these drop the stale DB rows.
       // A genuinely transient removal failure keeps the row, which the next run
       // retries - no permanent stale state, so no special-casing needed here.
-      await this.collectionService.removeFromCollection(collection.id, [
-        {
-          mediaServerId: media.mediaServerId,
-        },
-      ]);
-      await this.pruneSiblingCollections(collection.id, media.mediaServerId);
+      await this.collectionService.removeFromCollection(
+        collection.id,
+        [{ mediaServerId: media.mediaServerId }],
+        'all',
+        libraryReads,
+      );
+      await this.pruneSiblingCollections(
+        collection.id,
+        media.mediaServerId,
+        libraryReads,
+      );
       this.recentlyHandledMedia.markHandled(collection.id, media.mediaServerId);
       return 'removed-missing';
     }
@@ -183,11 +201,23 @@ export class CollectionHandler {
     // The request goes with the files, when forced. Seerr otherwise reconciles
     // through its availability sync; Ombi never un-marks an available request.
     if (freesDisk) {
-      if (this.settings.seerrConfigured() && collection.forceSeerr) {
-        await this.removeRequests('seerr', this.seerrApi, collection, media);
+      if (forceSeerr) {
+        await this.removeRequests(
+          'seerr',
+          this.seerrApi,
+          collection,
+          media,
+          seasonIndex,
+        );
       }
-      if (this.settings.ombiConfigured() && collection.forceOmbi) {
-        await this.removeRequests('ombi', this.ombiApi, collection, media);
+      if (forceOmbi) {
+        await this.removeRequests(
+          'ombi',
+          this.ombiApi,
+          collection,
+          media,
+          seasonIndex,
+        );
       }
     }
 
@@ -199,11 +229,9 @@ export class CollectionHandler {
     // can only discover via a 404.
     const updatedCollection = await this.collectionService.removeFromCollection(
       collection.id,
-      [
-        {
-          mediaServerId: media.mediaServerId,
-        },
-      ],
+      [{ mediaServerId: media.mediaServerId }],
+      'all',
+      libraryReads,
     );
     if (updatedCollection) {
       collection = updatedCollection;
@@ -236,7 +264,11 @@ export class CollectionHandler {
     // exists to remove. Unmonitor / quality actions leave the file in place, so
     // the item legitimately stays.
     if (freesDisk) {
-      await this.pruneSiblingCollections(collection.id, media.mediaServerId);
+      await this.pruneSiblingCollections(
+        collection.id,
+        media.mediaServerId,
+        libraryReads,
+      );
     }
 
     collection.handledMediaAmount++;
@@ -311,6 +343,7 @@ export class CollectionHandler {
     api: RequestService,
     collection: Collection,
     media: CollectionMedia,
+    seasonIndex: number | null | undefined,
   ): Promise<void> {
     const label = service === 'seerr' ? 'Seerr' : 'Ombi';
     const ids = await this.metadataService.resolveIdsForService(
@@ -330,15 +363,16 @@ export class CollectionHandler {
     let subject: string;
     switch (collection.type) {
       case 'season': {
-        const mediaServer = await this.getMediaServer();
-        const season = await mediaServer.getMetadata(media.mediaServerId);
         // != null: a null season index must not reach the service as a
         // season number either
-        if (season?.index == null) {
+        if (seasonIndex == null) {
+          this.logger.warn(
+            `[${label}] Couldn't read the season number of media server ID ${media.mediaServerId}. Skipping ${label} request removal.`,
+          );
           return;
         }
-        removed = await api.removeSeasonRequest(tmdbId, season.index);
-        subject = `request of season ${season.index} from show with TMDB ID '${tmdbId}'`;
+        removed = await api.removeSeasonRequest(tmdbId, seasonIndex);
+        subject = `request of season ${seasonIndex} from show with TMDB ID '${tmdbId}'`;
         break;
       }
       case 'episode':
@@ -384,11 +418,13 @@ export class CollectionHandler {
   private async pruneSiblingCollections(
     collectionId: number,
     mediaServerId: string,
+    libraryReads?: ArrLookupCache,
   ): Promise<void> {
     const prunedCollectionIds =
       await this.collectionService.removeMediaFromOtherCollections(
         mediaServerId,
         collectionId,
+        libraryReads,
       );
 
     for (const prunedCollectionId of prunedCollectionIds) {
