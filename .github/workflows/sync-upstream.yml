@@ -1,0 +1,86 @@
+# Keeps the fork current with Maintainerr/Maintainerr.
+#
+# `development` is a pure mirror of upstream and is only ever fast-forwarded,
+# never committed to directly - a push that is not a fast-forward fails loudly
+# rather than rewriting history.
+#
+# Upstream is then merged into the feature branch. A clean merge is pushed; a
+# conflicting one is parked on a branch and raised as a PR to resolve by hand.
+name: Sync upstream
+
+on:
+  schedule:
+    # Mondays 05:00 UTC. GitHub disables scheduled runs after 60 days with no
+    # repository activity - re-enable them in the Actions tab if that happens.
+    - cron: '0 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  UPSTREAM: https://github.com/Maintainerr/Maintainerr.git
+  FEATURE_BRANCH: feat/overlay-multi-artwork
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream "$UPSTREAM"
+          git fetch upstream development
+
+      - name: Fast-forward development
+        run: |
+          if git merge-base --is-ancestor origin/development upstream/development; then
+            git push origin upstream/development:refs/heads/development
+            echo "development fast-forwarded to $(git rev-parse --short upstream/development)"
+          else
+            echo "::error::development has diverged from upstream and cannot be fast-forwarded."
+            exit 1
+          fi
+
+      - name: Merge upstream into the feature branch
+        id: merge
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if ! git show-ref --verify --quiet "refs/remotes/origin/$FEATURE_BRANCH"; then
+            echo "No $FEATURE_BRANCH to update; development is in sync."
+            exit 0
+          fi
+
+          if git merge-base --is-ancestor upstream/development "origin/$FEATURE_BRANCH"; then
+            echo "Feature branch already contains upstream; nothing to do."
+            exit 0
+          fi
+
+          git checkout -B sync-attempt "origin/$FEATURE_BRANCH"
+          if git merge --no-edit upstream/development; then
+            git push origin "HEAD:$FEATURE_BRANCH"
+            echo "clean=true" >> "$GITHUB_OUTPUT"
+          else
+            git merge --abort || true
+            git push -f origin "HEAD:sync/upstream-$(date +%Y%m%d)"
+            echo "clean=false" >> "$GITHUB_OUTPUT"
+            echo "branch=sync/upstream-$(date +%Y%m%d)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Raise a PR when the merge conflicts
+        if: steps.merge.outputs.clean == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr create \
+            --base "$FEATURE_BRANCH" \
+            --head "${{ steps.merge.outputs.branch }}" \
+            --title "Sync upstream into $FEATURE_BRANCH" \
+            --body "Upstream moved and the automatic merge conflicted. Resolve here." \
+            || echo "A PR for this branch already exists."

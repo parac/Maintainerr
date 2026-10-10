@@ -1,0 +1,52 @@
+# Builds the container image and publishes it to GHCR.
+#
+# Both halves are free here: Actions minutes are unmetered on public
+# repositories, and GHCR storage and bandwidth are free for public packages.
+# The package inherits the repository's visibility on first publish.
+name: Build image
+
+on:
+  push:
+    branches:
+      - feat/overlay-multi-artwork
+      - development
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # Must be lowercase; the owner here already is.
+          images: ghcr.io/${{ github.repository_owner }}/maintainerr
+          tags: |
+            type=ref,event=branch
+            type=sha,format=long
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Layer cache lives in the Actions cache, so native deps (cairo,
+          # vips) are not recompiled on every run.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
