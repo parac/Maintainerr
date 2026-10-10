@@ -1,9 +1,9 @@
 # Pulls Maintainerr/Maintainerr into this fork.
 #
 # `development` here is upstream's development plus our own patches, so the
-# sync is an ordinary merge. A clean merge is pushed and the image rebuilt; a
-# conflicting one is parked on a branch and raised as a PR to resolve by hand,
-# so a surprise upstream change never lands unreviewed.
+# sync is an ordinary merge. A clean merge is pushed and the image rebuilt;
+# anything needing a human becomes a branch plus a PR, so a surprise upstream
+# change never lands unreviewed.
 name: Sync upstream
 
 on:
@@ -21,6 +21,12 @@ permissions:
 env:
   UPSTREAM: https://github.com/Maintainerr/Maintainerr.git
   BRANCH: development
+  # Upstream tables this fork has added columns to. SQLite cannot ALTER most
+  # columns, so `migration:generate` rebuilds a table by copying a column list
+  # fixed when the migration was written. Upstream writes those lists against a
+  # schema that has never heard of our columns, so an upstream migration that
+  # rebuilds one of these tables drops our data. Never merge that blind.
+  GUARDED_TABLES: 'collection overlay_item_state'
 
 jobs:
   sync:
@@ -48,16 +54,36 @@ jobs:
             exit 0
           fi
 
-          if git merge --no-edit upstream/development; then
-            git push origin "HEAD:$BRANCH"
-            echo "result=merged" >> "$GITHUB_OUTPUT"
-          else
+          BEFORE=$(git rev-parse HEAD)
+          BR="sync/upstream-$(date +%Y%m%d-%H%M)"
+          echo "branch=$BR" >> "$GITHUB_OUTPUT"
+
+          if ! git merge --no-edit upstream/development; then
             git merge --abort || true
-            BR="sync/upstream-$(date +%Y%m%d-%H%M)"
             git push origin "HEAD:$BR"
             echo "result=conflict" >> "$GITHUB_OUTPUT"
-            echo "branch=$BR" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+
+          # Does any migration upstream just added rebuild a table we extend?
+          : > /tmp/guard-hits
+          for f in $(git diff --name-only --diff-filter=A "$BEFORE..HEAD" -- apps/server/src/database/migrations/); do
+            for t in $GUARDED_TABLES; do
+              if grep -q "CREATE TABLE \"temporary_${t}\"" "$f"; then
+                echo "- \`${f##*/}\` rebuilds \`${t}\`" >> /tmp/guard-hits
+              fi
+            done
+          done
+
+          if [ -s /tmp/guard-hits ]; then
+            git push origin "HEAD:$BR"
+            echo "guard tripped:"; cat /tmp/guard-hits
+            echo "result=guard" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git push origin "HEAD:$BRANCH"
+          echo "result=merged" >> "$GITHUB_OUTPUT"
 
       # A push made with GITHUB_TOKEN does not start other workflows, so the
       # image build is asked for explicitly.
@@ -71,10 +97,36 @@ jobs:
         if: steps.merge.outputs.result == 'conflict'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_BRANCH: ${{ steps.merge.outputs.branch }}
         run: |
-          gh pr create \
-            --base "$BRANCH" \
-            --head "${{ steps.merge.outputs.branch }}" \
+          gh pr create --base "$BRANCH" --head "$HEAD_BRANCH" \
             --title "Sync upstream into $BRANCH" \
             --body "Upstream moved and the automatic merge conflicted. Resolve here, then merge." \
+            || echo "A PR for this branch already exists."
+
+      - name: Raise a PR when a rebuild would drop our columns
+        if: steps.merge.outputs.result == 'guard'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_BRANCH: ${{ steps.merge.outputs.branch }}
+        run: |
+          {
+            echo "The merge itself was clean, but an upstream migration rebuilds a"
+            echo "table this fork has added columns to:"
+            echo
+            cat /tmp/guard-hits
+            echo
+            echo "SQLite rebuilds copy a fixed column list, and upstream's list cannot"
+            echo "name our columns, so merging this as-is **drops that data on the next"
+            echo "boot** - silently for a config column, and fatally for one a query"
+            echo "filters on."
+            echo
+            echo "Before merging, read the migration's \`INSERT INTO \"temporary_<table>\"(...)\`"
+            echo "list. Either add a follow-up migration that re-adds the columns and"
+            echo "backfills them, or move them to a table this fork owns so it cannot"
+            echo "recur."
+          } > /tmp/guard-body
+          gh pr create --base "$BRANCH" --head "$HEAD_BRANCH" \
+            --title "Sync upstream into $BRANCH (migration rebuilds a table we extend)" \
+            --body-file /tmp/guard-body \
             || echo "A PR for this branch already exists."
