@@ -1,11 +1,9 @@
-# Keeps the fork current with Maintainerr/Maintainerr.
+# Pulls Maintainerr/Maintainerr into this fork.
 #
-# `development` is a pure mirror of upstream and is only ever fast-forwarded,
-# never committed to directly - a push that is not a fast-forward fails loudly
-# rather than rewriting history.
-#
-# Upstream is then merged into the feature branch. A clean merge is pushed; a
-# conflicting one is parked on a branch and raised as a PR to resolve by hand.
+# `development` here is upstream's development plus our own patches, so the
+# sync is an ordinary merge. A clean merge is pushed and the image rebuilt; a
+# conflicting one is parked on a branch and raised as a PR to resolve by hand,
+# so a surprise upstream change never lands unreviewed.
 name: Sync upstream
 
 on:
@@ -18,10 +16,11 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  actions: write
 
 env:
   UPSTREAM: https://github.com/Maintainerr/Maintainerr.git
-  FEATURE_BRANCH: feat/overlay-multi-artwork
+  BRANCH: development
 
 jobs:
   sync:
@@ -29,6 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
+          ref: development
           fetch-depth: 0
 
       - name: Fetch upstream
@@ -36,51 +36,45 @@ jobs:
           git remote add upstream "$UPSTREAM"
           git fetch upstream development
 
-      - name: Fast-forward development
-        run: |
-          if git merge-base --is-ancestor origin/development upstream/development; then
-            git push origin upstream/development:refs/heads/development
-            echo "development fast-forwarded to $(git rev-parse --short upstream/development)"
-          else
-            echo "::error::development has diverged from upstream and cannot be fast-forwarded."
-            exit 1
-          fi
-
-      - name: Merge upstream into the feature branch
+      - name: Merge upstream
         id: merge
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          if ! git show-ref --verify --quiet "refs/remotes/origin/$FEATURE_BRANCH"; then
-            echo "No $FEATURE_BRANCH to update; development is in sync."
+          if git merge-base --is-ancestor upstream/development HEAD; then
+            echo "Already contains upstream; nothing to do."
+            echo "result=noop" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          if git merge-base --is-ancestor upstream/development "origin/$FEATURE_BRANCH"; then
-            echo "Feature branch already contains upstream; nothing to do."
-            exit 0
-          fi
-
-          git checkout -B sync-attempt "origin/$FEATURE_BRANCH"
           if git merge --no-edit upstream/development; then
-            git push origin "HEAD:$FEATURE_BRANCH"
-            echo "clean=true" >> "$GITHUB_OUTPUT"
+            git push origin "HEAD:$BRANCH"
+            echo "result=merged" >> "$GITHUB_OUTPUT"
           else
             git merge --abort || true
-            git push -f origin "HEAD:sync/upstream-$(date +%Y%m%d)"
-            echo "clean=false" >> "$GITHUB_OUTPUT"
-            echo "branch=sync/upstream-$(date +%Y%m%d)" >> "$GITHUB_OUTPUT"
+            BR="sync/upstream-$(date +%Y%m%d-%H%M)"
+            git push origin "HEAD:$BR"
+            echo "result=conflict" >> "$GITHUB_OUTPUT"
+            echo "branch=$BR" >> "$GITHUB_OUTPUT"
           fi
 
+      # A push made with GITHUB_TOKEN does not start other workflows, so the
+      # image build is asked for explicitly.
+      - name: Rebuild the image
+        if: steps.merge.outputs.result == 'merged'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run build-image.yml --ref "$BRANCH"
+
       - name: Raise a PR when the merge conflicts
-        if: steps.merge.outputs.clean == 'false'
+        if: steps.merge.outputs.result == 'conflict'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh pr create \
-            --base "$FEATURE_BRANCH" \
+            --base "$BRANCH" \
             --head "${{ steps.merge.outputs.branch }}" \
-            --title "Sync upstream into $FEATURE_BRANCH" \
-            --body "Upstream moved and the automatic merge conflicted. Resolve here." \
+            --title "Sync upstream into $BRANCH" \
+            --body "Upstream moved and the automatic merge conflicted. Resolve here, then merge." \
             || echo "A PR for this branch already exists."

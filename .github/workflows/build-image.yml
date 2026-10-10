@@ -8,7 +8,6 @@ name: Build image
 on:
   push:
     branches:
-      - feat/overlay-multi-artwork
       - development
   workflow_dispatch:
 
